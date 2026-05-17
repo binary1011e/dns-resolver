@@ -7,3 +7,6 @@ edition = "2024"
 hickory-proto = "0.26.1"
 rand = "0.8"
 moka = { version = "0.12.15", features = ["sync"] }
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+async-trait = "0.1.89"
+async-recursion = "1.1.1"
