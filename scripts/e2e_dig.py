@@ -16,13 +16,23 @@ from typing import Dict, List, Optional
 
 
 class Runner:
-    def __init__(self, port: int, attach: bool, build: bool, stress_overload: bool, stress_requests: int, stress_concurrency: int) -> None:
+    def __init__(
+        self,
+        port: int,
+        attach: bool,
+        build: bool,
+        stress_overload: bool,
+        stress_requests: int,
+        stress_concurrency: int,
+        upstream_timeout_ms: int,
+    ) -> None:
         self.port = port
         self.attach = attach
         self.build = build
         self.stress_overload = stress_overload
         self.stress_requests = stress_requests
         self.stress_concurrency = stress_concurrency
+        self.upstream_timeout_ms = upstream_timeout_ms
         self.total = 0
         self.passed = 0
         self.failed = 0
@@ -166,6 +176,7 @@ class Runner:
         log_path = Path(f"/tmp/dns-resolver-e2e-{self.port}-{mode}.log")
         log_file = log_path.open("w")
         child_env = dict(os.environ)
+        child_env["DNS_UPSTREAM_TIMEOUT_MS"] = str(self.upstream_timeout_ms)
         if self.stress_overload:
             child_env["DNS_MAX_INFLIGHT"] = "8"
             child_env["DNS_QUEUE_TIMEOUT_MS"] = "5"
@@ -270,6 +281,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stress-overload", action="store_true", help="Run opt-in overload stress checks")
     parser.add_argument("--stress-requests", type=int, default=200, help="Overload stress query count")
     parser.add_argument("--stress-concurrency", type=int, default=64, help="Overload stress concurrency")
+    parser.add_argument(
+        "--upstream-timeout-ms",
+        type=int,
+        default=600,
+        help="Set DNS_UPSTREAM_TIMEOUT_MS for self-managed resolver runs (default: 600)",
+    )
     return parser.parse_args()
 
 
@@ -291,6 +308,7 @@ def main() -> int:
         stress_overload=args.stress_overload,
         stress_requests=args.stress_requests,
         stress_concurrency=args.stress_concurrency,
+        upstream_timeout_ms=args.upstream_timeout_ms,
     )
     atexit.register(runner.cleanup)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(130))
