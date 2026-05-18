@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 struct ScriptedTransportAdapter {
-    scripts: Mutex<HashMap<SocketAddr, VecDeque<Result<Vec<u8>, ErrorKind>>>>,
+    scripts: Mutex<HashMap<SocketAddr, VecDeque<Result<Vec<u8>, Error>>>>,
 }
 
 impl ScriptedTransportAdapter {
@@ -25,7 +25,7 @@ impl ScriptedTransportAdapter {
         }
     }
 
-    fn push_response(&self, server: SocketAddr, response: Result<Vec<u8>, ErrorKind>) {
+    fn push_response(&self, server: SocketAddr, response: Result<Vec<u8>, Error>) {
         let mut scripts = self.scripts.lock().unwrap();
         scripts.entry(server).or_default().push_back(response);
     }
@@ -50,7 +50,7 @@ impl DnsTransport for ScriptedTransportAdapter {
                 }
                 Ok(bytes)
             }
-            Some(Err(kind)) => Err(Error::new(kind, "scripted error")),
+            Some(Err(err)) => Err(err),
             None => Err(Error::new(ErrorKind::TimedOut, "scripted response depleted")),
         }
     }
@@ -250,4 +250,16 @@ async fn recursive_servfail_propagation() {
     let request = req("recursive.example.com.", RecordType::A);
     let out = resolver.resolve(&request, request.queries.first().unwrap()).await;
     assert_eq!(out.status, ResolutionStatus::ServFail);
+}
+
+#[tokio::test]
+async fn transport_error_with_nxdomain_text_still_times_out_after_retries() {
+    let root: SocketAddr = ROOT_SERVERS[0].parse().unwrap();
+    let t = ScriptedTransportAdapter::new();
+    t.push_response(root, Err(Error::new(ErrorKind::Other, "nxdomain text from transport")));
+    let cache = Cache::new(100);
+    let resolver = IterativeResolver::new(&t, &cache);
+    let request = req("message.example.com.", RecordType::A);
+    let out = resolver.resolve(&request, request.queries.first().unwrap()).await;
+    assert_eq!(out.status, ResolutionStatus::Timeout);
 }

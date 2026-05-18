@@ -39,9 +39,14 @@ impl<'a> IterativeResolver<'a> {
     }
 
     #[async_recursion]
-    async fn resolve_names(&self, names: &[Name], depth: usize) -> Result<Vec<SocketAddr>, Error> {
+    async fn resolve_names(
+        &self,
+        names: &[Name],
+        depth: usize,
+    ) -> Result<Vec<SocketAddr>, ResolutionStatus> {
         if depth > 16 {
-            return Err(Error::new(ErrorKind::Other, "max recursion depth"));
+            eprintln!("iterative resolver: max recursion depth");
+            return Err(ResolutionStatus::ServFail);
         }
 
         let mut addrs = Vec::new();
@@ -66,9 +71,15 @@ impl<'a> IterativeResolver<'a> {
     }
 
     #[async_recursion]
-    async fn lookup_records(&self, name: Name, qtype: RecordType, depth: usize) -> Result<Vec<Record>, Error> {
+    async fn lookup_records(
+        &self,
+        name: Name,
+        qtype: RecordType,
+        depth: usize,
+    ) -> Result<Vec<Record>, ResolutionStatus> {
         if depth > 16 {
-            return Err(Error::new(ErrorKind::Other, "max recursion depth reached"));
+            eprintln!("iterative resolver: max recursion depth reached");
+            return Err(ResolutionStatus::ServFail);
         }
 
         let key = make_cache_key(&name, qtype);
@@ -87,10 +98,12 @@ impl<'a> IterativeResolver<'a> {
                     return Ok(adjusted);
                 }
                 CachedValue::NXDomain { expires_at } if expires_at > now => {
-                    return Err(Error::new(ErrorKind::Other, "DNS error: NXDomain"));
+                    eprintln!("iterative resolver: cached NXDomain");
+                    return Err(ResolutionStatus::NxDomain);
                 }
                 CachedValue::ServFail { expires_at } if expires_at > now => {
-                    return Err(Error::new(ErrorKind::Other, "DNS error: ServFail"));
+                    eprintln!("iterative resolver: cached ServFail");
+                    return Err(ResolutionStatus::ServFail);
                 }
                 _ => self.cache.invalidate(&key),
             }
@@ -106,7 +119,13 @@ impl<'a> IterativeResolver<'a> {
 
                 for server in &root_servers {
                     let id: u16 = rand::thread_rng().r#gen();
-                    let query_bytes = build_query(current_name.clone(), qtype, id)?;
+                    let query_bytes = match build_query(current_name.clone(), qtype, id) {
+                        Ok(q) => q,
+                        Err(_) => {
+                            eprintln!("iterative resolver: malformed query build");
+                            return Err(ResolutionStatus::Malformed);
+                        }
+                    };
                     let resp_bytes = match self.transport.exchange(&query_bytes, *server).await {
                         Ok(b) => b,
                         Err(_) => continue,
@@ -124,8 +143,11 @@ impl<'a> IterativeResolver<'a> {
                     break;
                 }
 
-                let bytes = response_bytes.ok_or_else(|| Error::new(ErrorKind::TimedOut, "no response from servers"))?;
-                let resp = Message::from_vec(&bytes).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+                let Some(bytes) = response_bytes else {
+                    eprintln!("iterative resolver: no response from servers");
+                    return Err(ResolutionStatus::Timeout);
+                };
+                let resp = Message::from_vec(&bytes).map_err(|_| ResolutionStatus::Malformed)?;
 
                 let final_records: Vec<Record> = resp
                     .answers
@@ -181,7 +203,8 @@ impl<'a> IterativeResolver<'a> {
                             expires_at: Instant::now() + Duration::from_secs(neg_ttl as u64),
                         },
                     );
-                    return Err(Error::new(ErrorKind::Other, "DNS Error: NXDomain"));
+                    eprintln!("iterative resolver: DNS Error: NXDomain");
+                    return Err(ResolutionStatus::NxDomain);
                 }
                 if resp.metadata.response_code == ResponseCode::ServFail {
                     self.cache.insert(
@@ -190,7 +213,8 @@ impl<'a> IterativeResolver<'a> {
                             expires_at: Instant::now() + Duration::from_secs(5),
                         },
                     );
-                    return Err(Error::new(ErrorKind::Other, "DNS Error: ServFail"));
+                    eprintln!("iterative resolver: DNS Error: ServFail");
+                    return Err(ResolutionStatus::ServFail);
                 }
 
                 let soa_records: Vec<Record> = resp
@@ -241,19 +265,17 @@ impl<'a> IterativeResolver<'a> {
                     next = self.resolve_names(&ns_names, depth + 1).await?;
                 }
                 if next.is_empty() {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        "referral had NS names but no usable A/AAAA addresses",
-                    ));
+                    eprintln!(
+                        "iterative resolver: referral had NS names but no usable A/AAAA addresses"
+                    );
+                    return Err(ResolutionStatus::ServFail);
                 }
                 root_servers = next;
             }
         }
 
-        Err(Error::new(
-            ErrorKind::Other,
-            "max CNAME/referral iterations reached",
-        ))
+        eprintln!("iterative resolver: max CNAME/referral iterations reached");
+        Err(ResolutionStatus::ServFail)
     }
 }
 
@@ -267,23 +289,7 @@ impl Resolver for IterativeResolver<'_> {
                     .partition(|r| r.record_type() == RecordType::SOA);
                 ResolutionOutcome::noerror(answers, authorities)
             }
-            Err(e) => {
-                let status = if e.kind() == ErrorKind::TimedOut {
-                    ResolutionStatus::Timeout
-                } else if e.kind() == ErrorKind::InvalidData {
-                    ResolutionStatus::Malformed
-                } else {
-                    let msg = e.to_string().to_lowercase();
-                    if msg.contains("nxdomain") {
-                        ResolutionStatus::NxDomain
-                    } else if msg.contains("servfail") {
-                        ResolutionStatus::ServFail
-                    } else {
-                        ResolutionStatus::ServFail
-                    }
-                };
-                ResolutionOutcome::with_status(status, Vec::new())
-            }
+            Err(status) => ResolutionOutcome::with_status(status, Vec::new()),
         }
     }
 }
